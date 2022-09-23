@@ -1,1 +1,8 @@
+*.ipynb
+/lc0/
+/nibbler/
+/Stockfish/
 /.idea/
+
+# Temporary
+/lichess
