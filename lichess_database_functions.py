@@ -18,13 +18,63 @@ import pandas as pd
 import requests
 
 
+DEFAULT_CHUNK_SIZE: int = 2 ** 30
+
+DEFAULT_COMBINE_POSITIONS_LIMIT: int = 2
+
 INITIAL_POSITION_MOVELESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0'
 
 LICHESS_STANDARD_DATABASE_URL: str = 'https://database.lichess.org/standard/'
 
+PROCESSING_GAMES_INVERSE_SHARE: int = 2 ** 10
+
+
+def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT) -> None:
+    """
+    Combines several monthly csv-files into one.
+    :param positions_limit:
+    :return:
+    """
+
+    local_lichess_data: dict[str, tuple[bool, bool]] = get_local_lichess_data()
+
+    position_counts: dict[str, int] = defaultdict(int)
+
+    for database_id, (has_log, has_file) in local_lichess_data.items():
+        if has_log:
+            with open(file=f'lichess/csv/{database_id}.csv',
+                      mode='r',
+                      encoding='utf-8',
+                      ) as file:
+                for line in file:
+                    moveless_fen, count = line.split(sep=',')
+
+                    position_counts[moveless_fen] += int(count)
+
+    position_counts_dataframe: pd.DataFrame = \
+        pd.DataFrame(data=(item for item in position_counts.items() if item[1] >= positions_limit),
+                     columns=('moveless_fen', 'count'),
+                     )
+
+    position_counts_dataframe \
+        .sort_values(by='count',
+                     ascending=False,
+                     ) \
+        .to_csv(path_or_buf=f'lichess/csv/lichess_popular_positions.csv',
+                sep=',',
+                header=False,
+                index=False,
+                )
+
 
 def get_lichess_standard_database_checksums(url: str = f'{LICHESS_STANDARD_DATABASE_URL}sha256sums.txt',
                                             ) -> dict[str, str]:
+    """
+    Get dict of pairs (filename, sha256sum) for monthly lichess.org standard databases from corresponding URL.
+    :param url:
+    :return:
+    """
+
     page_text: str = requests.get(url=url).text
 
     checksums: dict[str, str] = \
@@ -36,7 +86,7 @@ def get_lichess_standard_database_checksums(url: str = f'{LICHESS_STANDARD_DATAB
 def get_lichess_standard_database_filenames_and_counts(url: str = f'{LICHESS_STANDARD_DATABASE_URL}counts.txt',
                                                        ) -> dict[str, int]:
     """
-    Get tuple of pairs (filename, games_count) for monthly lichess.org standard databases from corresponding URL.
+    Get dict of pairs (filename, games_count) for monthly lichess.org standard databases from corresponding URL.
     :param url:
     :return: filenames_and_counts
     """
@@ -49,28 +99,27 @@ def get_lichess_standard_database_filenames_and_counts(url: str = f'{LICHESS_STA
     return filenames_and_counts
 
 
-def get_local_lichess_data() -> dict[str, tuple[bool, int]]:
+def get_local_lichess_data() -> dict[str, tuple[bool, bool]]:
     """
     Gets local lichess data.
     :return:
     """
 
-    filenames_and_counts: dict[str, int] = get_lichess_standard_database_filenames_and_counts()
+    checksums: dict[str, str] = get_lichess_standard_database_checksums()
 
     logs_files: list[str] = os.listdir('lichess/logs')
 
-    csv_files: list[str] = os.listdir('lichess/csv')
+    local_lichess_data: dict[str, tuple[bool, bool]] = {}
 
-    local_lichess_data: dict[str, tuple[bool, int]] = {}
-
-    for filename in filenames_and_counts.keys():
+    for filename in checksums.keys():
         database_id: str = filename[26:33]
 
         has_log: bool = (database_id in logs_files)
 
-        csv_count: int = sum(1 for csv_file in csv_files if database_id in csv_file)
+        has_file: bool = (os.path.exists(f'lichess/pgn/{filename}') and
+                          os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0] == checksums[filename])
 
-        local_lichess_data[database_id] = has_log, csv_count
+        local_lichess_data[database_id] = has_log, has_file
 
     return local_lichess_data
 
@@ -86,71 +135,106 @@ def get_moveless_fen(board: chess.Board) -> str:
 
 
 def process_lichess_database_month(database_id: str,
-                                   chunk_size: int = 2 ** 30,
-                                   positions_limit: int = 2 ** 3,
-                                   csv_count: int = 0,
-                                   filenames_and_counts: dict[str, int] = None,
+                                   chunk_size: int = DEFAULT_CHUNK_SIZE,
+                                   positions_limit: int = 1,
                                    checksums: dict[str, str] = None,
+                                   filenames_and_counts: dict[str, int] = None,
                                    ) -> None:
     """
     Processes lichess database for given month.
     :param database_id:
     :param chunk_size:
     :param positions_limit:
-    :param csv_count:
-    :param filenames_and_counts:
     :param checksums:
+    :param filenames_and_counts:
     :return:
     """
-
-    if filenames_and_counts is None:
-        filenames_and_counts = get_lichess_standard_database_filenames_and_counts()
 
     if checksums is None:
         checksums = get_lichess_standard_database_checksums()
 
+    if filenames_and_counts is None:
+        filenames_and_counts = get_lichess_standard_database_filenames_and_counts()
+
     filename: str
 
-    games_count: int
-
-    for filename in filenames_and_counts.keys():
+    for filename in checksums.keys():
         if database_id in filename:
             break
     else:
         raise ValueError(f'{database_id} not found.')
 
-    if os.path.exists(f'lichess/pgn/{filename}'):
-        if os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0] != checksums[filename]:
-            os.remove(f'lichess/pgn/{filename}')
-
     if not os.path.exists(f'lichess/pgn/{filename}'):
-        os.system(f'wget --no-verbose -O lichess/pgn/{filename} {LICHESS_STANDARD_DATABASE_URL}{filename}')
+        raise OSError(f'{filename} doesn`t exist.')
+
+    sha256sum: str = os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0]
+
+    if sha256sum != checksums[filename]:
+        raise OSError(f'{filename} has the wrong sha256sum. {sha256sum} instead of {checksums[filename]}.')
+
+    game_elos: list[int] = [0, 0]
+
+    elo_counter: defaultdict[int, int] = defaultdict(int)
 
     bz2_file: bz2.BZ2File = bz2.open(filename=f'lichess/pgn/{filename}',
                                      mode='r',
                                      )
 
-    chunk_id: int = 0
+    while True:
+        try:
+            chunk: list[bytes] = bz2_file.readlines(size=chunk_size)
+        except EOFError:
+            chunk = bz2_file.readlines()
+
+        if not chunk:
+            break
+
+        for line in chunk:
+            update_game_elos(line=line,
+                             game_elos=game_elos,
+                             )
+
+            if b'1. ' in line and b'"]' not in line:
+                elo_counter[min(game_elos)] += 1
+
+    bz2_file.close()
+
+    cumulative_elo_counter: int = 0
+
+    min_elo: int = 0
+
+    for elo in sorted(elo_counter, reverse=True):
+        cumulative_elo_counter += elo_counter[elo]
+
+        if cumulative_elo_counter * PROCESSING_GAMES_INVERSE_SHARE >= filenames_and_counts[filename]:
+            min_elo = elo
+
+            break
+
+    bz2_file = bz2.open(filename=f'lichess/pgn/{filename}',
+                        mode='r',
+                        )
+
+    position_counts: defaultdict[str, int] = defaultdict(int)
 
     while True:
         try:
-            chunk: bytes = b''.join(line for line in bz2_file.readlines(size=chunk_size))
+            chunk: list[bytes] = bz2_file.readlines(size=chunk_size)
         except EOFError:
-            chunk = b''.join(line for line in bz2_file.readlines())
+            chunk = bz2_file.readlines()
 
-        if chunk == b'':
+        if not chunk:
             break
 
-        if chunk_id >= csv_count:
-            pgn: io.StringIO = io.StringIO(chunk.decode("utf-8"))
+        for line in chunk:
+            update_game_elos(line=line,
+                             game_elos=game_elos,
+                             )
 
-            positions: defaultdict[str, int] = defaultdict(int)
+            if b'1. ' in line and b'"]' not in line and min(game_elos) >= min_elo:
+                pgn: io.StringIO = io.StringIO(line.decode("utf-8"))
 
-            while True:
                 game: chess.pgn.Game = chess.pgn.read_game(pgn)
-
-                if game is None:
-                    break
 
                 game_positions: set = set()
 
@@ -164,25 +248,24 @@ def process_lichess_database_month(database_id: str,
                     game_positions.add(get_moveless_fen(board))
 
                 for game_position in game_positions:
-                    positions[game_position] += 1
+                    position_counts[game_position] += 1
 
-            df: pd.DataFrame = pd.DataFrame(data=(item for item in positions.items() if item[1] >= positions_limit),
-                                            columns=('moveless_fen', f'{database_id}_{chunk_id}'),
-                                            )
+    position_counts_dataframe: pd.DataFrame = \
+        pd.DataFrame(data=(item for item in position_counts.items() if item[1] >= positions_limit),
+                     columns=('moveless_fen', f'{database_id}'),
+                     )
 
-            df.to_csv(path_or_buf=f'lichess/csv/{database_id}_{chunk_id}.csv',
-                      sep=',',
-                      header=False,
-                      index=False,
-                      )
-
-        chunk_id += 1
+    position_counts_dataframe.to_csv(path_or_buf=f'lichess/csv/{database_id}.csv',
+                                     sep=',',
+                                     header=False,
+                                     index=False,
+                                     )
 
     with open(file=f'lichess/logs/{database_id}',
               mode='w',
               encoding='utf-8',
               ) as file:
-        file.write(f'{database_id}\n')
+        file.write(f'{min_elo}\n{position_counts[INITIAL_POSITION_MOVELESS_FEN]}\n')
 
     os.remove(f'lichess/pgn/{filename}')
 
@@ -193,36 +276,32 @@ def process_lichess_databases(threads_count: int = 1) -> None:
     :return:
     """
 
-    filenames_and_counts: dict[str, int] = get_lichess_standard_database_filenames_and_counts()
-
     checksums: dict[str, str] = get_lichess_standard_database_checksums()
 
-    local_lichess_data: dict[str, tuple[bool, int]] = get_local_lichess_data()
+    local_lichess_data: dict[str, tuple[bool, bool]] = get_local_lichess_data()
 
     process_dict: dict[str, mp.Process] = {}
 
     running_process_set: set[mp.Process] = set()
 
-    for filename in filenames_and_counts.keys():
+    for filename in checksums.keys():
         database_id: str = filename[26:33]
 
         has_log: bool
 
-        csv_count: int
+        has_file: bool
 
-        has_log, csv_count = local_lichess_data[database_id]
+        has_log, has_file = local_lichess_data[database_id]
 
-        if not has_log:
+        if has_file and not has_log:
             process_dict[database_id] = \
                 mp.Process(target=process_lichess_database_month,
                            kwargs={'database_id': database_id,
-                                   'csv_count': csv_count,
-                                   'filenames_and_counts': filenames_and_counts,
                                    'checksums': checksums,
                                    },
                            )
 
-    while process_dict:
+    while process_dict or running_process_set:
         for process in running_process_set:
             if not process.is_alive():
                 running_process_set.remove(process)
@@ -239,4 +318,26 @@ def process_lichess_databases(threads_count: int = 1) -> None:
 
                 break
         else:
-            sleep(10.)
+            sleep(2 ** 4)
+
+
+def update_game_elos(line: bytes,
+                     game_elos: list[int]) -> None:
+    """
+    Updates elos of the game players.
+    :param line:
+    :param game_elos:
+    :return:
+    """
+
+    if b'WhiteElo' in line:
+        white_elo_str: str = ''.join(filter(str.isdigit, line.decode("utf-8")))
+
+        if white_elo_str:
+            game_elos[0] = int(white_elo_str)
+
+    if b'BlackElo' in line:
+        black_elo_str: str = ''.join(filter(str.isdigit, line.decode("utf-8")))
+
+        if black_elo_str:
+            game_elos[1] = int(black_elo_str)
