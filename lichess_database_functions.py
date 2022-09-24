@@ -66,6 +66,14 @@ def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT)
                 index=False,
                 )
 
+    with open(file=f'lichess/logs/lichess_popular_positions_info',
+              mode='w',
+              encoding='utf-8',
+              ) as file:
+        file.write(f'GAMES_COUNT:     {position_counts[INITIAL_POSITION_MOVELESS_FEN]}\n')
+
+        file.write(f'POSITIONS_COUNT: {len(position_counts_dataframe.index)}\n')
+
 
 def get_lichess_standard_database_checksums(url: str = f'{LICHESS_STANDARD_DATABASE_URL}sha256sums.txt',
                                             ) -> dict[str, str]:
@@ -134,14 +142,14 @@ def get_moveless_fen(board: chess.Board) -> str:
     return board.fen().rsplit(sep=' ', maxsplit=1)[0]
 
 
-def process_lichess_database_month(database_id: str,
-                                   chunk_size: int = DEFAULT_CHUNK_SIZE,
-                                   positions_limit: int = 1,
-                                   checksums: dict[str, str] = None,
-                                   filenames_and_counts: dict[str, int] = None,
-                                   ) -> None:
+def process_lichess_monthly_database(database_id: str,
+                                     chunk_size: int = DEFAULT_CHUNK_SIZE,
+                                     positions_limit: int = 1,
+                                     checksums: dict[str, str] = None,
+                                     filenames_and_counts: dict[str, int] = None,
+                                     ) -> None:
     """
-    Processes lichess database for given month.
+    Processes lichess database for the given month.
     :param database_id:
     :param chunk_size:
     :param positions_limit:
@@ -265,12 +273,12 @@ def process_lichess_database_month(database_id: str,
               mode='w',
               encoding='utf-8',
               ) as file:
-        file.write(f'{min_elo}\n{position_counts[INITIAL_POSITION_MOVELESS_FEN]}\n')
+        file.write(f'{min_elo}\n{position_counts[INITIAL_POSITION_MOVELESS_FEN]}\n{len(position_counts)}\n')
 
     os.remove(f'lichess/pgn/{filename}')
 
 
-def process_lichess_databases(threads_count: int = 1) -> None:
+def process_lichess_monthly_databases(threads_count: int = 1) -> None:
     """
     Processes all lichess databases.
     :return:
@@ -295,7 +303,7 @@ def process_lichess_databases(threads_count: int = 1) -> None:
 
         if has_file and not has_log:
             process_dict[database_id] = \
-                mp.Process(target=process_lichess_database_month,
+                mp.Process(target=process_lichess_monthly_database,
                            kwargs={'database_id': database_id,
                                    'checksums': checksums,
                                    },
