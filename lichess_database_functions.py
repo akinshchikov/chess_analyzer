@@ -22,6 +22,8 @@ DEFAULT_CHUNK_SIZE: int = 2 ** 30
 
 DEFAULT_COMBINE_POSITIONS_LIMIT: int = 2
 
+DEFAULT_WAITING_TIME: int = 2 ** 6
+
 INITIAL_POSITION_MOVELESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0'
 
 LICHESS_STANDARD_DATABASE_URL: str = 'https://database.lichess.org/standard/'
@@ -278,9 +280,13 @@ def process_lichess_monthly_database(database_id: str,
     os.remove(f'lichess/pgn/{filename}')
 
 
-def process_lichess_monthly_databases(threads_count: int = 1) -> None:
+def process_lichess_monthly_databases(threads_count: int = 1,
+                                      waiting_time: int = DEFAULT_WAITING_TIME,
+                                      ) -> None:
     """
     Processes all lichess databases.
+    :param threads_count:
+    :param waiting_time:
     :return:
     """
 
@@ -326,7 +332,7 @@ def process_lichess_monthly_databases(threads_count: int = 1) -> None:
 
                 break
         else:
-            sleep(2 ** 4)
+            sleep(waiting_time)
 
 
 def update_game_elos(line: bytes,
