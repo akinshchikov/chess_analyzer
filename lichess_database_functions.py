@@ -28,7 +28,50 @@ INITIAL_POSITION_MOVELESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBN
 
 LICHESS_STANDARD_DATABASE_URL: str = 'https://database.lichess.org/standard/'
 
-PROCESSING_GAMES_INVERSE_SHARE: int = 2 ** 10
+PROCESSING_GAMES_INVERSE_SHARE: int = 2 ** 11
+
+
+def check_monthly_database_logs_availability() -> dict[str, bool]:
+    """
+    Checks for every lichess.org monthly database if its local log is available.
+    :return:
+    """
+
+    checksums: dict[str, str] = get_lichess_standard_database_checksums()
+
+    logs_files: list[str] = os.listdir('lichess/logs')
+
+    monthly_database_logs_availability: dict[str, bool] = {}
+
+    for filename in checksums.keys():
+        database_id: str = filename[26:33]
+
+        has_log: bool = (database_id in logs_files)
+
+        monthly_database_logs_availability[database_id] = has_log
+
+    return monthly_database_logs_availability
+
+
+def check_monthly_database_pgns_availability() -> dict[str, bool]:
+    """
+    Checks for every lichess.org monthly database if its pgn file is downloaded and has correct sha256 checksum.
+    :return:
+    """
+
+    checksums: dict[str, str] = get_lichess_standard_database_checksums()
+
+    monthly_database_pgns_availability: dict[str, bool] = {}
+
+    for filename in checksums.keys():
+        database_id: str = filename[26:33]
+
+        has_file: bool = (os.path.exists(f'lichess/pgn/{filename}') and
+                          os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0] == checksums[filename])
+
+        monthly_database_pgns_availability[database_id] = has_file
+
+    return monthly_database_pgns_availability
 
 
 def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT) -> None:
@@ -38,11 +81,11 @@ def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT)
     :return:
     """
 
-    local_lichess_data: dict[str, tuple[bool, bool]] = get_local_lichess_data()
+    logs_availability: dict[str, bool] = check_monthly_database_logs_availability()
 
     position_counts: dict[str, int] = defaultdict(int)
 
-    for database_id, (has_log, has_file) in local_lichess_data.items():
+    for database_id, has_log in logs_availability.items():
         if has_log:
             with open(file=f'lichess/csv/{database_id}.csv',
                       mode='r',
@@ -107,31 +150,6 @@ def get_lichess_standard_database_filenames_and_counts(url: str = f'{LICHESS_STA
         {line.split()[0]: int(line.split()[1]) for line in page_text.split('\n') if ' ' in line}
 
     return filenames_and_counts
-
-
-def get_local_lichess_data() -> dict[str, tuple[bool, bool]]:
-    """
-    Gets local lichess data.
-    :return:
-    """
-
-    checksums: dict[str, str] = get_lichess_standard_database_checksums()
-
-    logs_files: list[str] = os.listdir('lichess/logs')
-
-    local_lichess_data: dict[str, tuple[bool, bool]] = {}
-
-    for filename in checksums.keys():
-        database_id: str = filename[26:33]
-
-        has_log: bool = (database_id in logs_files)
-
-        has_file: bool = (os.path.exists(f'lichess/pgn/{filename}') and
-                          os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0] == checksums[filename])
-
-        local_lichess_data[database_id] = has_log, has_file
-
-    return local_lichess_data
 
 
 def get_moveless_fen(board: chess.Board) -> str:
@@ -292,7 +310,9 @@ def process_lichess_monthly_databases(threads_count: int = 1,
 
     checksums: dict[str, str] = get_lichess_standard_database_checksums()
 
-    local_lichess_data: dict[str, tuple[bool, bool]] = get_local_lichess_data()
+    logs_availability: dict[str, bool] = check_monthly_database_logs_availability()
+
+    pgns_availability: dict[str, bool] = check_monthly_database_pgns_availability()
 
     process_dict: dict[str, mp.Process] = {}
 
@@ -301,13 +321,7 @@ def process_lichess_monthly_databases(threads_count: int = 1,
     for filename in checksums.keys():
         database_id: str = filename[26:33]
 
-        has_log: bool
-
-        has_file: bool
-
-        has_log, has_file = local_lichess_data[database_id]
-
-        if has_file and not has_log:
+        if pgns_availability[database_id] and not logs_availability[database_id]:
             process_dict[database_id] = \
                 mp.Process(target=process_lichess_monthly_database,
                            kwargs={'database_id': database_id,
