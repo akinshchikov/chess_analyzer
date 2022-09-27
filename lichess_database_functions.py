@@ -336,7 +336,7 @@ def process_lichess_monthly_databases(threads_count: int = 1,
 
                 break
 
-        if len(running_process_set) < threads_count:
+        while len(running_process_set) < threads_count and process_dict:
             for database_id, process in process_dict.items():
                 running_process_set.add(process)
 
@@ -345,8 +345,8 @@ def process_lichess_monthly_databases(threads_count: int = 1,
                 del process_dict[database_id]
 
                 break
-        else:
-            sleep(waiting_time)
+
+        sleep(waiting_time)
 
 
 def update_game_elos(line: bytes,
