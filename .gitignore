@@ -6,3 +6,5 @@
 
 # Temporary
 /lichess
+/.pylintrc
+/setup.cfg

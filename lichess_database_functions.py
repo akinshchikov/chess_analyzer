@@ -11,6 +11,7 @@ import multiprocessing as mp
 import os
 
 from collections import defaultdict
+from pathlib import Path
 from time import sleep
 
 import chess.pgn
@@ -22,7 +23,7 @@ DEFAULT_CHUNK_SIZE: int = 2 ** 30
 
 DEFAULT_COMBINE_POSITIONS_LIMIT: int = 2
 
-DEFAULT_WAITING_TIME: int = 2 ** 6
+DEFAULT_WAITING_TIME: int = 2 ** 8
 
 INITIAL_POSITION_MOVELESS_FEN: str = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0'
 
@@ -31,47 +32,114 @@ LICHESS_STANDARD_DATABASE_URL: str = 'https://database.lichess.org/standard/'
 PROCESSING_GAMES_INVERSE_SHARE: int = 2 ** 11
 
 
-def check_monthly_database_logs_availability() -> dict[str, bool]:
+def check_file_errors(checksums: dict[str, str],
+                      database_id: str,
+                      filename: str, ) -> None:
+    """
+    Checks for file-related errors.
+    :param checksums:
+    :param database_id:
+    :param filename:
+    :return:
+    """
+
+    if filename not in checksums.keys():
+        raise ValueError(f'{database_id} checksum not found.')
+
+    if not Path(f'lichess/pgn_bz2/{filename}').exists():
+        raise OSError(f'{filename} doesn`t exist.')
+
+    sha256sum: str = os.popen(f'sha256sum lichess/pgn_bz2/{filename}').read().split()[0]
+
+    if checksums[filename] != os.popen(f'sha256sum lichess/pgn_bz2/{filename}').read().split()[0]:
+        raise OSError(f'{filename} has the wrong sha256sum. {sha256sum} instead of {checksums[filename]}.')
+
+
+def check_monthly_database_elo_csv_availability(checksums: dict[str, str] | None = None) -> dict[str, bool]:
+    """
+    Checks for every lichess.org monthly database if its elo csv is available.
+    :param checksums:
+    :return:
+    """
+
+    if checksums is None:
+        checksums = get_lichess_standard_database_checksums()
+
+    elo_csvs: tuple[str] = tuple(child.name for child in Path('lichess/elo_csv').iterdir())
+
+    monthly_database_elo_csv_availability: dict[str, bool] = {}
+
+    for filename in checksums.keys():
+        database_id: str = filename[26:33]
+
+        has_elo_csv: bool = (f'{database_id}_elo.csv' in elo_csvs)
+
+        monthly_database_elo_csv_availability[database_id] = has_elo_csv
+
+    return monthly_database_elo_csv_availability
+
+
+def check_monthly_database_pgn_log_availability(checksums: dict[str, str] | None = None) -> dict[str, bool]:
     """
     Checks for every lichess.org monthly database if its local log is available.
+    :param checksums:
     :return:
     """
 
-    checksums: dict[str, str] = get_lichess_standard_database_checksums()
+    if checksums is None:
+        checksums = get_lichess_standard_database_checksums()
 
-    logs_files: list[str] = os.listdir('lichess/logs')
+    pgn_logs: tuple[str] = tuple(child.name for child in Path('lichess/pgn_log').iterdir())
 
-    monthly_database_logs_availability: dict[str, bool] = {}
+    monthly_database_pgn_log_availability: dict[str, bool] = {}
 
     for filename in checksums.keys():
         database_id: str = filename[26:33]
 
-        has_log: bool = (database_id in logs_files)
+        has_pgn_log: bool = (database_id in pgn_logs)
 
-        monthly_database_logs_availability[database_id] = has_log
+        monthly_database_pgn_log_availability[database_id] = has_pgn_log
 
-    return monthly_database_logs_availability
+    return monthly_database_pgn_log_availability
 
 
-def check_monthly_database_pgns_availability() -> dict[str, bool]:
+def check_monthly_database_pgn_bz2_availability(checksums: dict[str, str] | None = None) -> dict[str, bool]:
     """
     Checks for every lichess.org monthly database if its pgn file is downloaded and has correct sha256 checksum.
+    :param checksums:
     :return:
     """
 
-    checksums: dict[str, str] = get_lichess_standard_database_checksums()
+    if checksums is None:
+        checksums = get_lichess_standard_database_checksums()
 
-    monthly_database_pgns_availability: dict[str, bool] = {}
+    monthly_database_pgn_bz2_availability: dict[str, bool] = {}
+
+    filename: str
+
+    database_id: str
 
     for filename in checksums.keys():
-        database_id: str = filename[26:33]
+        database_id = filename[26:33]
 
-        has_file: bool = (os.path.exists(f'lichess/pgn/{filename}') and
-                          os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0] == checksums[filename])
+        monthly_database_pgn_bz2_availability[database_id] = False
 
-        monthly_database_pgns_availability[database_id] = has_file
+    sha256sum_command: str = 'parallel sha256sum ::: ' + ' '.join(
+        f'lichess/pgn_bz2/{filename}' for filename in checksums.keys() if Path(f'lichess/pgn_bz2/{filename}').exists()
+    )
 
-    return monthly_database_pgns_availability
+    sha256sum_output: list[str] = os.popen(cmd=sha256sum_command).read().split()
+
+    for index in range(len(sha256sum_output) // 2):
+        sha256sum: str = sha256sum_output[index * 2]
+
+        filename = sha256sum_output[index * 2 + 1][16:]
+
+        database_id = filename[26:33]
+
+        monthly_database_pgn_bz2_availability[database_id] = (sha256sum == checksums[filename])
+
+    return monthly_database_pgn_bz2_availability
 
 
 def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT) -> None:
@@ -81,13 +149,13 @@ def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT)
     :return:
     """
 
-    logs_availability: dict[str, bool] = check_monthly_database_logs_availability()
+    pgn_log_availability: dict[str, bool] = check_monthly_database_pgn_log_availability()
 
     position_counts: dict[str, int] = defaultdict(int)
 
-    for database_id, has_log in logs_availability.items():
-        if has_log:
-            with open(file=f'lichess/csv/{database_id}.csv',
+    for database_id, has_pgn_log in pgn_log_availability.items():
+        if has_pgn_log:
+            with open(file=f'lichess/pgn_csv/{database_id}.csv',
                       mode='r',
                       encoding='utf-8',
                       ) as file:
@@ -105,13 +173,13 @@ def combine_monthly_csvs(positions_limit: int = DEFAULT_COMBINE_POSITIONS_LIMIT)
         .sort_values(by='count',
                      ascending=False,
                      ) \
-        .to_csv(path_or_buf=f'lichess/csv/lichess_popular_positions.csv',
+        .to_csv(path_or_buf='lichess/pgn_csv/lichess_popular_positions.csv',
                 sep=',',
                 header=False,
                 index=False,
                 )
 
-    with open(file=f'lichess/logs/lichess_popular_positions_info',
+    with open(file='lichess/pgn_log/lichess_popular_positions_info',
               mode='w',
               encoding='utf-8',
               ) as file:
@@ -159,52 +227,33 @@ def get_moveless_fen(board: chess.Board) -> str:
     :return: moveless fen
     """
 
-    return board.fen().rsplit(sep=' ', maxsplit=1)[0]
+    return board.fen().rsplit(maxsplit=1)[0]
 
 
-def process_lichess_monthly_database(database_id: str,
-                                     chunk_size: int = DEFAULT_CHUNK_SIZE,
-                                     positions_limit: int = 1,
-                                     checksums: dict[str, str] = None,
-                                     filenames_and_counts: dict[str, int] = None,
-                                     ) -> None:
+def generate_lichess_monthly_database_elo_csv(database_id: str,
+                                              chunk_size: int = DEFAULT_CHUNK_SIZE,
+                                              checksums: dict[str, str] | None = None,
+                                              ) -> None:
     """
-    Processes lichess database for the given month.
+    Generates elo csv from lichess database for the given month.
     :param database_id:
     :param chunk_size:
-    :param positions_limit:
     :param checksums:
-    :param filenames_and_counts:
     :return:
     """
 
     if checksums is None:
         checksums = get_lichess_standard_database_checksums()
 
-    if filenames_and_counts is None:
-        filenames_and_counts = get_lichess_standard_database_filenames_and_counts()
+    filename: str = f'lichess_db_standard_rated_{database_id}.pgn.bz2'
 
-    filename: str
-
-    for filename in checksums.keys():
-        if database_id in filename:
-            break
-    else:
-        raise ValueError(f'{database_id} not found.')
-
-    if not os.path.exists(f'lichess/pgn/{filename}'):
-        raise OSError(f'{filename} doesn`t exist.')
-
-    sha256sum: str = os.popen(f'sha256sum lichess/pgn/{filename}').read().split()[0]
-
-    if sha256sum != checksums[filename]:
-        raise OSError(f'{filename} has the wrong sha256sum. {sha256sum} instead of {checksums[filename]}.')
+    check_file_errors(checksums, database_id, filename)
 
     game_elos: list[int] = [0, 0]
 
     elo_counter: defaultdict[int, int] = defaultdict(int)
 
-    bz2_file: bz2.BZ2File = bz2.open(filename=f'lichess/pgn/{filename}',
+    bz2_file: bz2.BZ2File = bz2.open(filename=f'lichess/pgn_bz2/{filename}',
                                      mode='r',
                                      )
 
@@ -227,6 +276,59 @@ def process_lichess_monthly_database(database_id: str,
 
     bz2_file.close()
 
+    elo_counter_dataframe: pd.DataFrame = pd.DataFrame(data=elo_counter.items(),
+                                                       columns=('elo', 'count'),
+                                                       )
+
+    elo_counter_dataframe \
+        .sort_values(by='elo',
+                     ascending=True,
+                     ) \
+        .to_csv(path_or_buf=f'lichess/elo_csv/{database_id}_elo.csv',
+                sep=',',
+                header=False,
+                index=False,
+                )
+
+
+def generate_lichess_monthly_database_pgn_csv(database_id: str,
+                                              chunk_size: int = DEFAULT_CHUNK_SIZE,
+                                              positions_limit: int = 1,
+                                              checksums: dict[str, str] | None = None,
+                                              filenames_and_counts: dict[str, int] | None = None,
+                                              ) -> None:
+    """
+    Generates elo csv from lichess database for the given month.
+    :param database_id:
+    :param chunk_size:
+    :param positions_limit:
+    :param checksums:
+    :param filenames_and_counts:
+    :return:
+    """
+
+    if checksums is None:
+        checksums = get_lichess_standard_database_checksums()
+
+    if filenames_and_counts is None:
+        filenames_and_counts = get_lichess_standard_database_filenames_and_counts()
+
+    filename: str = f'lichess_db_standard_rated_{database_id}.pgn.bz2'
+
+    check_file_errors(checksums, database_id, filename)
+
+    game_elos: list[int] = [0, 0]
+
+    elo_counter_dataframe = pd.read_csv(filepath_or_buffer=f'lichess/elo_csv/{database_id}_elo.csv',
+                                        sep=',',
+                                        header=None,
+                                        names=('elo', 'count'),
+                                        index_col='elo',
+                                        dtype=int,
+                                        )
+
+    elo_counter: dict[int, int] = dict(elo_counter_dataframe['count'])
+
     cumulative_elo_counter: int = 0
 
     min_elo: int = 0
@@ -239,9 +341,9 @@ def process_lichess_monthly_database(database_id: str,
 
             break
 
-    bz2_file = bz2.open(filename=f'lichess/pgn/{filename}',
-                        mode='r',
-                        )
+    bz2_file: bz2.BZ2File = bz2.open(filename=f'lichess/pgn_bz2/{filename}',
+                                     mode='r',
+                                     )
 
     position_counts: defaultdict[str, int] = defaultdict(int)
 
@@ -264,7 +366,7 @@ def process_lichess_monthly_database(database_id: str,
 
                 game: chess.pgn.Game = chess.pgn.read_game(pgn)
 
-                game_positions: set = set()
+                game_positions: set[str] = set()
 
                 board: chess.Board = game.board()
 
@@ -278,24 +380,28 @@ def process_lichess_monthly_database(database_id: str,
                 for game_position in game_positions:
                     position_counts[game_position] += 1
 
+    bz2_file.close()
+
     position_counts_dataframe: pd.DataFrame = \
         pd.DataFrame(data=(item for item in position_counts.items() if item[1] >= positions_limit),
-                     columns=('moveless_fen', f'{database_id}'),
+                     columns=('moveless_fen', 'count'),
                      )
 
-    position_counts_dataframe.to_csv(path_or_buf=f'lichess/csv/{database_id}.csv',
-                                     sep=',',
-                                     header=False,
-                                     index=False,
-                                     )
+    position_counts_dataframe \
+        .sort_values(by='count',
+                     ascending=False,
+                     ) \
+        .to_csv(path_or_buf=f'lichess/pgn_csv/{database_id}.csv',
+                sep=',',
+                header=False,
+                index=False,
+                )
 
-    with open(file=f'lichess/logs/{database_id}',
+    with open(file=f'lichess/pgn_log/{database_id}',
               mode='w',
               encoding='utf-8',
               ) as file:
         file.write(f'{min_elo}\n{position_counts[INITIAL_POSITION_MOVELESS_FEN]}\n{len(position_counts)}\n')
-
-    os.remove(f'lichess/pgn/{filename}')
 
 
 def process_lichess_monthly_databases(threads_count: int = 1,
@@ -310,41 +416,121 @@ def process_lichess_monthly_databases(threads_count: int = 1,
 
     checksums: dict[str, str] = get_lichess_standard_database_checksums()
 
-    logs_availability: dict[str, bool] = check_monthly_database_logs_availability()
+    pgn_log_availability: dict[str, bool] = check_monthly_database_pgn_log_availability(checksums=checksums)
 
-    pgns_availability: dict[str, bool] = check_monthly_database_pgns_availability()
+    elo_csv_availability: dict[str, bool] = check_monthly_database_elo_csv_availability(checksums=checksums)
 
-    process_dict: dict[str, mp.Process] = {}
+    pgn_bz2_availability: dict[str, bool] = check_monthly_database_pgn_bz2_availability(checksums=checksums)
+
+    elo_csv_process_dict: dict[str, mp.Process] = {}
+
+    pgn_csv_process_dict: dict[str, mp.Process] = {}
+
+    elo_csv_process_need: dict[str, bool] = {key: not value for key, value in elo_csv_availability.items()}
+
+    pgn_csv_process_need: dict[str, bool] = {key: not value for key, value in pgn_log_availability.items()}
 
     running_process_set: set[mp.Process] = set()
 
+    database_id: str
+
     for filename in checksums.keys():
-        database_id: str = filename[26:33]
+        database_id = filename[26:33]
 
-        if pgns_availability[database_id] and not logs_availability[database_id]:
-            process_dict[database_id] = \
-                mp.Process(target=process_lichess_monthly_database,
-                           kwargs={'database_id': database_id,
-                                   'checksums': checksums,
-                                   },
-                           )
+        if pgn_bz2_availability[database_id]:
+            if not elo_csv_availability[database_id]:
+                elo_csv_process_need[database_id] = False
 
-    while process_dict or running_process_set:
+                elo_csv_process_dict[database_id] = \
+                    mp.Process(target=generate_lichess_monthly_database_elo_csv,
+                               kwargs={'database_id': database_id,
+                                       'checksums': checksums,
+                                       },
+                               name=f'{database_id} elo',
+                               )
+            elif not pgn_log_availability[database_id]:
+                pgn_csv_process_need[database_id] = False
+
+                pgn_csv_process_dict[database_id] = \
+                    mp.Process(target=generate_lichess_monthly_database_pgn_csv,
+                               kwargs={'database_id': database_id,
+                                       'checksums': checksums,
+                                       },
+                               name=f'{database_id} pgn',
+                               )
+
+    while elo_csv_process_dict or pgn_csv_process_dict or running_process_set:
         for process in running_process_set:
             if not process.is_alive():
                 running_process_set.remove(process)
 
                 break
 
-        while len(running_process_set) < threads_count and process_dict:
-            for database_id, process in process_dict.items():
+        while len(running_process_set) < threads_count and elo_csv_process_dict:
+            for database_id, process in elo_csv_process_dict.items():
                 running_process_set.add(process)
 
                 process.start()
 
-                del process_dict[database_id]
+                del elo_csv_process_dict[database_id]
 
                 break
+        else:
+            while len(running_process_set) < threads_count and pgn_csv_process_dict:
+                for database_id, process in pgn_csv_process_dict.items():
+                    running_process_set.add(process)
+
+                    process.start()
+
+                    del pgn_csv_process_dict[database_id]
+
+                    break
+            else:
+                for filename, _ in checksums.items():
+                    database_id = filename[26:33]
+
+                    if not pgn_bz2_availability[database_id]:
+                        if Path(f'lichess/pgn_bz2/{filename}').exists():
+                            if os.popen(cmd=f'sha256sum lichess/pgn_bz2/{filename}').read().split()[0] == \
+                                    checksums[filename]:
+                                pgn_bz2_availability[database_id] = True
+
+                    if not elo_csv_availability[database_id]:
+                        if Path(f'lichess/elo_csv/{database_id}').exists():
+                            elo_csv_availability[database_id] = True
+
+                    if not pgn_log_availability[database_id]:
+                        if Path(f'lichess/pgn_log/{database_id}').exists():
+                            pgn_log_availability[database_id] = True
+
+                    if pgn_bz2_availability[database_id]:
+                        if not elo_csv_availability[database_id]:
+                            if elo_csv_process_need[database_id]:
+                                elo_csv_process_need[database_id] = False
+
+                                elo_csv_process_dict[database_id] = \
+                                    mp.Process(target=generate_lichess_monthly_database_elo_csv,
+                                               kwargs={'database_id': database_id,
+                                                       'checksums': checksums,
+                                                       },
+                                               name=f'{database_id} elo',
+                                               )
+                        elif not pgn_log_availability[database_id]:
+                            if pgn_csv_process_need[database_id]:
+                                pgn_csv_process_need[database_id] = False
+
+                                pgn_csv_process_dict[database_id] = \
+                                    mp.Process(target=generate_lichess_monthly_database_pgn_csv,
+                                               kwargs={'database_id': database_id,
+                                                       'checksums': checksums,
+                                                       },
+                                               name=f'{database_id} pgn',
+                                               )
+
+                        if pgn_log_availability[database_id] and elo_csv_availability[database_id]:
+                            Path(f'lichess/pgn_bz2/{filename}').unlink()
+
+                            pgn_bz2_availability[database_id] = False
 
         sleep(waiting_time)
 
